@@ -1,0 +1,547 @@
+Introduction
+
+ 
+
+After creating a Kubernetes cluster and deploying the apps, the question that rises is: How can we handle the logs?
+
+One option to view the logs is using the command: kubectl logs POD_NAME. That is useful for debugging. But there is a better option suited for production systems. That is using EFK. The rest of the article will introduce EFK, install it on Kubernetes and configure it to view the logs.
+
+ 
+
+What is EFK
+
+ 
+
+EFK is a suite of tools combining Elasticsearch, Fluentd and Kibana to manage logs. Fluentd will collect the logs and send it to Elasticsearch. This latter will receive the logs and save it on its database. Kibana will fetch the logs from Elasticsearch and display it on a nice web app. All three components are available as binaries or as Docker containers.
+
+Info: ELK is an alternative to EFK replacing Fluentd with Logstash.
+
+For more details on the EFK architecture, follow this video:
+
+https://www.youtube.com/watch?v=mwToMPpDHfg&list=PLpbcUe4chE79sB7Jg7B4z3HytqUUEwcNE&index=4
+
+ 
+
+thumbnail image 1 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+Installing EFK on Kubernetes
+
+ 
+
+Because EFK components are available as docker containers, it is easy to install it on k8s. For that, we’ll need the following:
+
+Kubernetes cluster (Minikube or AKS…)
+Kubectl CLI
+Helm CLI
+ 
+
+1. Installing Elasticsearch using Helm
+
+ 
+
+We’ll start with deploying Elasticsearch into Kubernetes using the Helm chart available here on Github. The chart will create all the required objects:
+
+Pods to run the master and client and manage data storage.
+Services to expose Elasticsearch client to Fluentd.
+Persistent Volumes to store data (logs).
+ 
+
+$ helm install elasticsearch stable/elasticsearch 
+ 
+
+Let’s wait for a few (10-15) minutes to create all the required components. After that, we can check the created pods using the command:
+
+ 
+
+$ kubectl get pods
+ 
+
+thumbnail image 2 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+Then we can check for the created services with the command:
+
+ 
+
+$ kubectl get services
+ 
+
+thumbnail image 3 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+2. Installing Fluentd as DaemonSet
+
+ 
+
+Fluentd should be installed on each node on the Kubernetes cluster. To achieve that, we use the DaemonSet. Fluentd development team provided a simple configuration file available here: https://github.com/fluent/fluentd-kubernetes-daemonset/blob/master/fluentd-daemonset-elasticsearch.y...
+
+ 
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  # namespace: kube-system
+  labels:
+    k8s-app: fluentd-logging
+    version: v1
+spec:
+  selector:
+    matchLabels:
+      k8s-app: fluentd-logging
+      version: v1
+  template:
+    metadata:
+      labels:
+        k8s-app: fluentd-logging
+        version: v1
+    spec:
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      containers:
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1-debian-elasticsearch
+        env:
+          - name:  FLUENT_ELASTICSEARCH_HOST
+            value: "elasticsearch-client"
+          - name:  FLUENT_ELASTICSEARCH_PORT
+            value: "9200"
+          - name: FLUENT_ELASTICSEARCH_SCHEME
+            value: "http"
+          # Option to configure elasticsearch plugin with self signed certs
+          # ================================================================
+          - name: FLUENT_ELASTICSEARCH_SSL_VERIFY
+            value: "false" # changed by me
+          # Option to configure elasticsearch plugin with tls
+          # ================================================================
+          - name: FLUENT_ELASTICSEARCH_SSL_VERSION
+            value: "TLSv1_2"
+          # X-Pack Authentication
+          # =====================
+          - name: FLUENT_ELASTICSEARCH_USER
+            value: "elastic"
+          - name: FLUENT_ELASTICSEARCH_PASSWORD
+            value: "changeme"
+          # Logz.io Authentication
+          # ======================
+          - name: LOGZIO_TOKEN
+            value: "ThisIsASuperLongToken"
+          - name: LOGZIO_LOGTYPE
+            value: "kubernetes"
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+ 
+
+Fluentd should be able to send the logs to Elasticsearch. It needs to know its service name, port number and the schema. These configurations will be passed to the Fluentd pods through environment variables. Thus, in the yaml file, we notice the following configurations:
+
+ 
+
+        env:
+          - name:  FLUENT_ELASTICSEARCH_HOST
+            value: "elasticsearch-client"
+          - name:  FLUENT_ELASTICSEARCH_PORT
+            value: "9200"
+          - name: FLUENT_ELASTICSEARCH_SCHEME
+            value: "http"
+ 
+
+The value "elasticsearch-client" is the name of the Elasticsearch service that routes traffic into the client pod.
+
+Note: A DaemonSet is a Kubernetes object used to deploy a Pod on each Node.
+
+Note: Fluentd could be deployed also using a Helm chart available on this link https://github.com/helm/charts/tree/master/stable/fluentd.
+
+ 
+
+Now let’s deploy Fluentd using the command:
+
+ 
+
+$ kubectl apply -f .\fluentd-daemonset-elasticsearch.yaml
+ 
+
+We can verify the install by checking the 3 new pods, 3 because we have 3 nodes in the cluster:
+
+ 
+
+thumbnail image 4 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+3. Installing Kibana using Helm
+
+ 
+
+The last component to install in EFK is Kibana. Kibana is available as a Helm chart that could be found here: https://github.com/helm/charts/tree/master/stable/kibana.
+
+ 
+
+The chart will deploy a single Pod, a Service and a ConfigMap. The ConfigMap get its key values from the values.yaml file. This config will be loaded by the Kibana container running inside the Pod. This configuration is specific to Kibana, to get the Elasticsearch host or service name, for example. The default value for the Elasticsearch host is http://elasticsearch:9200. While in our example it should be http://elasticsearch-client:9200. We need to change that.
+
+ 
+
+The Service that will route traffic to Kibana Pod is using type ClusterIP by default. As we want to access the dashboard easily, we’ll override the type to use LoadBalancer. That will create a public IP address.
+
+In Helm, we can override some of the config in values.yaml using another yaml file. We’ll call it kibana-values.yaml. Lets create that file with the following content:
+
+ 
+
+files:
+  kibana.yml:
+    ## Default Kibana configuration from kibana-docker.
+    server.name: kibana
+    server.host: "0"
+    ## For kibana < 6.6, use elasticsearch.url instead
+    elasticsearch.hosts: http://elasticsearch-client:9200
+service:
+  type: LoadBalancer # ClusterIP
+ 
+
+Now, we are ready to deploy Kibana using Helm with the overridden configuration:
+
+ 
+
+$ helm install kibana stable/kibana -f kibana-values.yaml
+ 
+
+In a few seconds, when the deployment is complete, we can check whether the created Pod is running using kubectl get pods command.
+
+ 
+
+thumbnail image 5 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+Then we check for the created service with LoadBalancer type.
+
+ 
+
+thumbnail image 6 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+From here, we can copy the external IP address (51.138.9.156 here) and open it in a web browser. We should not forget to add the port number which is 443.
+
+ 
+
+thumbnail image 7 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+Then click on “Discover”. And there we’ll find some logs !
+
+ 
+
+thumbnail image 8 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+4. Deploying and viewing application logs
+
+ 
+
+In this section, we’ll deploy a sample container that outputs log files in an infinite loop. Then we’ll try to filter these logs in Kibana.
+
+ 
+
+## counter.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: counter
+spec:
+  containers:
+  - name: count
+    image: busybox
+    args: [/bin/sh, -c, 'i=0; while true; do echo "Demo log $i: $(date)"; i=$((i+1)); sleep 1; done']
+ 
+
+Let’s first deploy this sample Pod:
+
+ 
+
+$ kubectl apply -f .\counter.yaml
+ 
+
+We make sure it is created successfully:
+
+ 
+
+thumbnail image 9 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+Now, if we switch to Kibana dashboard and refresh it, we’ll be able to see logs collected from the counter Pod:
+
+ 
+
+thumbnail image 10 of blog post titled 
+	
+	
+	 
+	
+	
+	
+				
+		
+			
+				
+						
+							Getting Started with Logging Using EFK on Kubernetes
+							
+						
+					
+			
+		
+	
+			
+	
+	
+	
+	
+	
+
+ 
+
+We can also filter the logs using queries like: kubernetes.pod_name: counter.
+
+The content of this article is also available as a video on youtube on this link: https://www.youtube.com/watch?v=9dfNMIZjbWg&list=PLpbcUe4chE79sB7Jg7B4z3HytqUUEwcNE&index=5
